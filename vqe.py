@@ -4,6 +4,8 @@ from typing import Callable, Literal, Dict, Any, Tuple, List, Iterable
 import qiskit
 import qiskit_aer
 from qiskit import QuantumCircuit
+from qiskit_aer.noise import (NoiseModel, QuantumError, ReadoutError,
+    pauli_error, depolarizing_error, thermal_relaxation_error)
 from qiskit.quantum_info import Statevector, Pauli, SparsePauliOp
 from qiskit.circuit import Parameter
 from qiskit.circuit.library import TwoLocal
@@ -13,300 +15,134 @@ import matplotlib.pyplot as plt
 from scipy.optimize import minimize
 import time
 from qiskit.visualization import plot_state_hinton 
-from modules_v1 import ansätze, hamiltonians
+from modules_v1 import ansätze, hamiltonians, utils
 
+ErrorNames = Literal['bit-flip']
 
-def construct_matrix_ising(n_qubits: int, J1: tuple = (1,), scope: int = 1, J2: tuple = (None, None, None)):
+class Vqe:
     
-    if len(J1) != scope:
-        raise ValueError("La longitud de J1 debe coincidir con el valor de alcance.")
-    
-    I = np.array([[1, 0], [0,  1]])
-    Z = np.array([[1, 0], [0, -1]])
-    X = np.array([[0, 1], [1,  0]])
-    Y = np.array([[0, -1j], [1j,  0]])
+    def __init__(self,n_qubits: int, error_type: ErrorNames = None, **kwargs) -> None:
+        # El error se debe especificar como una tupla o lista [RESET, MEAS, 1GATE]
+        self.n_qubits = n_qubits
+        self.noise_model = None
 
-    interaction_terms = []
-    
-    for i in range(1,scope+1):
-        interaction_term = Z
-        for j in range(i):
-            if j == i-1:
-                interaction_term = np.kron(interaction_term,Z)
-            else:
-                interaction_term = np.kron(interaction_term,I)
-        interaction_terms.append(interaction_term)
+        if error_type:
+            self.noise_model = NoiseModel()
+            if error_type == 'bit-flip':
+                probs = kwargs.get('probs', [0.05, 0.05, 0.05])
+                error_reset = pauli_error([('X', probs[0]), ('I', 1 - probs[0])])
+                error_meas = pauli_error([('X', probs[1]), ('I', 1 - probs[1])])
+                error_gate1 = pauli_error([('X', probs[2]), ('I', 1 - probs[2])])
+                error_gate2 = error_gate1.tensor(error_gate1)
 
+                self.noise_model.add_all_qubit_quantum_error(error = error_reset, instructions = 'reset')
+                self.noise_model.add_all_qubit_quantum_error(error_meas, "measure")
+                self.noise_model.add_all_qubit_quantum_error(error_gate1, ["u1", "u2", "u3"])
+                self.noise_model.add_all_qubit_quantum_error(error_gate2, ["cx"])
 
-    matrices = (X,Y,Z)
+    def __call__(self, hamiltoniano: dict, num_iterations: int = 1, ansatz_name: ansätze.AnsatzName = None, theta_values: Iterable = None, **ansatz_kwargs: Any) -> Tuple[Dict, float]:
 
-    terms = []
+        n_qubits = self.n_qubits
+        start = time.perf_counter()
+        glob_runtime: float = 0.0
 
-    if J1 and J1[0] != 0 :
-        try:
-            for alcance, interact_term in enumerate(interaction_terms, start = 1):
-                for i in range(n_qubits-alcance):
-                    term = interact_term
-                    for j in range(i): # Identidades por la izquierda
-                        term = np.kron(I,term)
-                    for j in range(n_qubits-alcance-1-i): # Identidades por la derecha (restamos 2 porque son dos matrices Z) range(n_qubits-alcance-1-i) ahora restamos alcance+1
-                        term = np.kron(term,I)
-                    terms.append(J1[alcance - 1] * term * -1)
-        except Exception as e:
-            print(e)
-
-    for mat, coeff in zip(matrices, J2):
-        if coeff is not None and coeff != 0:
-            try:
-                for i in range(n_qubits):
-                    term = mat
-                    for j in range(i):
-                        term = np.kron(I,term)
-                    for j in range(n_qubits-i-1):
-                        term = np.kron(term,I)
-                    terms.append(coeff * term * -1)
-            except Exception as e:
-                print(e)
-                sys.exit(1)
-            
-    return sum(terms)
-
-
-def change_basis(h_term):
-
-    change_basis = ()
-    
-    # print(f'El término que quiero medir es: {h_term}')
-    for qubit, operator in h_term:
-        if operator in ('I', 'Z'):
-            change_basis += ((qubit, 'I'),)
-        elif operator == 'X':
-            change_basis += ((qubit, 'H'),)
-        elif operator == 'Y':
-            change_basis += ((qubit, 'S'), ) # Pongo S para conservar 1 sólo char, la otra función lo tendrá en cuenta para hacer HS^dag
+        if ansatz_name is not None:
+            ansatz_fun = ansätze.ansatz_functions[ansatz_name]
+            ansatz = ansatz_fun(n_qubits = n_qubits, **ansatz_kwargs)
         else:
-            print(f'He encontrado un char ({operator}) en un término del hamiltoniano que no entiendo')
-    
-    return change_basis
+            print("Es necesario expecificar un tipo de ansatz")
+            sys.exit(1)
+        
+        expected_value_H_ising_1D = utils.ExpectedValueHIsing1DWrapper(vqe_instance = self)
+        cost_function = lambda p: expected_value_H_ising_1D(p, h_terms = hamiltoniano, ansatz = ansatz)
+        magnetizacion = hamiltonians.ising_Hamiltonian_1D(n_qubits = n_qubits,J1 = (-1,) , scope = 0)
 
-
-
-def prepare_to_measure(qc: QuantumCircuit, basis_term = None):
-    
-    n_qubits = qc.num_qubits
-    i_qubit = 0
-    if basis_term is not None:
-
-        for qubit, operator in basis_term:
-            if i_qubit < qubit:
-                for i in range(i_qubit, qubit):
-                    qc.id(i)
-            if operator == 'I':
-                qc.id(qubit)
-            elif operator == 'H':
-                qc.h(qubit)
-            elif operator == 'S':
-                qc.sdg(qubit)
-                qc.h(qubit)
-
-            i_qubit = qubit +1
-        for i in range(i_qubit, n_qubits):
-            qc.id(i)
-
-    qc.measure(range(n_qubits), range(n_qubits))
-    
-    return qc
-
-
-def computar_circuito(circuit, num_shots = 1024):
-    
-    sim = qiskit_aer.AerSimulator()
-    circuit_transpiled = qiskit.transpile(circuit, sim)
-    job = sim.run(circuit_transpiled, shots = num_shots, memory = True)
-    result = job.result()
-    counts_MSBF = result.get_counts()
-    probs = {}
-    
-    for key in counts_MSBF:
-        nueva_key = key[::-1]
-        probs[nueva_key] = counts_MSBF[key]/num_shots
-    
-    return result, probs
-
-def valor_esperado_Pauli_string(estado, pauli_string):
-
-    e = 1
-
-    for qubit, _ in pauli_string:
-        if estado[qubit] == '0':
-            e *= 1
+        if theta_values is None:
+            aleatory = True
         else:
-            e *= -1
+            aleatory = False
 
-    # print(f'El observable {pauli_string} tiene un valor esperado en el estado {estado} de {e}')
+        rng = np.random.default_rng()
 
-    return e
+        glob_history = []
 
-# Los parámetros a optimizar deben ser el primer argumento
-class ExpectedValueHIsing1DWrapper:
+        cycle = 0
 
-    def __init__(self) -> None:
-        self.value = None
-        self.state = None
-    
-    def __call__(self, theta_values: Iterable, h_terms: dict, ansatz: QuantumCircuit, magn: bool = False) -> float:
-        # Ahora h_terms va a ser en minúscula y va a ser un diccionario:  {((qubit, 'operador'), (qubit, 'operador')): coef}
-        self.value = 0
-        # print(f'\nVeamos el valor esperado del Hamiltoniano: {h_terms}')
-
-        mag_per_state: dict = {}
-        
-        for term_tuples, coef in h_terms.items():
+        for _ in range(num_iterations):
             
-            basis_term = change_basis(h_term = term_tuples)
+            if aleatory and ansatz_name == 'ansatz_simple_rotation':
+                theta_values = rng.random(n_qubits) * 4 * np.pi
+            elif aleatory and ansatz_name == 'ansatz_Efficient_SU2':
+                theta_values = rng.random(4 * n_qubits) * 4 * np.pi
+            elif aleatory and ansatz_name == 'ansatz_two_local':
+                rep = ansatz_kwargs.get('repetitions', 1)
+                entanglement = ansatz_kwargs.get('entanglement', 'linear')
+                entanglement_gate = ansatz_kwargs.get('entanglement_gate', 'cx')
+                if entanglement_gate in ('crx', 'cry', 'crz'):
+                    if entanglement in ('linear', 'reverse_linear'):
+                        theta_values = rng.random(n_qubits * (2 * rep + 1) - rep) * 4 * np.pi
+                    elif entanglement == 'full':
+                        theta_values = rng.random(n_qubits * ( (n_qubits-1)*rep/2 + rep+1 )) * 4 * np.pi
+                    elif entanglement == 'circular':
+                        theta_values = rng.random(n_qubits * ( 2*rep + 1)) * 4 * np.pi
+                elif entanglement_gate in ('cx',):
+                    theta_values = rng.random(n_qubits*(rep+1)) * 4 * np.pi
+            elif aleatory and ansatz_name == 'ansatz_transerse_ising':
+                param_set = ansatz_kwargs.get('param_set', 'unique')
+                if param_set == 'unique':
+                    theta_values = rng.random(3) * 4 * np.pi
+                elif param_set == 'complete':
+                    theta_values = rng.random(n_qubits+2) * 4 * np.pi
+
+            history = {
+                'cost': [],
+                'params': [],
+                'state': []
+            }
+            def callback(p):
+                history["cost"].append(expected_value_H_ising_1D.value)
+                history["params"].append(p)
+                history["state"].append(expected_value_H_ising_1D.state)
+
+            result_scipy = minimize(fun = cost_function, x0 = theta_values, method = 'COBYLA', callback = callback)
+            cycle +=1
+            print('\n----------------------------------------------------------------------------------------------------------------------\n')
+            print("Cycle:", cycle)
+            print("Success:", result_scipy.success)
+            print("Status:", result_scipy.status)
+            print("Message:", result_scipy.message)
+            print("Function value at minimum:", result_scipy.fun)
+            print("Optimal parameters:", result_scipy.x)
+            print("Number of iterations performed:", result_scipy.get('nit', 'Not available'))
+            print("Number of function evaluations:", result_scipy.get('nfev', 'Not available'))
             
-            qc = ansatz.assign_parameters(theta_values, inplace = False)
+            history['number_evaluations'] = result_scipy.get('nfev', 'Not available')
+            history['optimal parameters'] = result_scipy.x
+            history['iterations'] = result_scipy.get('nit', 'Not available')
 
-            qc_measure = prepare_to_measure(qc = qc, basis_term = basis_term)
 
-            result, probs = computar_circuito(circuit = qc_measure)
+            final_circuit = ansatz.assign_parameters(result_scipy.x, inplace = False)
+            final_circuit.measure(range(n_qubits), range(n_qubits))
+            result, probs = utils.computar_circuito(circuit=final_circuit)
+            state = result.get_statevector()
+            print(f'La función de onda final tras la optimización es: {state.data}')
+            print(f'El resultado de computar el circuito optimizado es (tras normalizarlo): {probs}')
+            print(f'El Hamiltoniano analizado es: {hamiltoniano}, con un valor esperado de {result_scipy.fun}')
 
-            self.state = result.get_statevector()
+            ############# MAGNETIZACION ##############
 
-            e = 0
-
-            if not magn:
-
-                for state in probs:
-
-                    valor = valor_esperado_Pauli_string(estado = state, pauli_string = term_tuples)
-                    e += valor * probs[state] * coef
-
-                self.value += e
+            magnet_avg = expected_value_H_ising_1D(theta_values = history['optimal parameters'], h_terms = magnetizacion, ansatz = ansatz, magn = True)/n_qubits
+            print(f'La magnetización es de: {magnet_avg}')
             
-            else:
-                
-                for state in probs:
-                    if state not in mag_per_state:
-                        mag_per_state[state] = 0
-                    valor = valor_esperado_Pauli_string(estado = state, pauli_string = term_tuples)
-                    mag_per_state[state] += valor * probs[state] * coef
-            
-        if magn:
-
-            for state in mag_per_state:
-
-                self.value += np.abs(mag_per_state[state])
-
-
-    
-        # print(f'En esta iteración el Hamiltoniano tiene un valor esperado de: {self.value}, probs: {probs}\n')
-
-        return self.value
-
-
-def vqe(n_qubits: int, hamiltoniano: dict, num_iterations: int = 1, ansatz_name: ansätze.AnsatzName = None, theta_values: Iterable = None, **ansatz_kwargs: Any):
-    start = time.perf_counter()
-    glob_runtime: float = 0.0
-
-
-    if ansatz_name is not None:
-        ansatz_fun = ansätze.ansatz_functions[ansatz_name]
-        ansatz = ansatz_fun(n_qubits = n_qubits, **ansatz_kwargs)
-    else:
-        print("Es necesario expecificar un tipo de ansatz")
-        sys.exit(1)
-    
-    expected_value_H_ising_1D = ExpectedValueHIsing1DWrapper()
-    cost_function = lambda p: expected_value_H_ising_1D(p, h_terms = hamiltoniano, ansatz = ansatz)
-    magnetizacion = hamiltonians.ising_Hamiltonian_1D(n_qubits = n_qubits,J1 = (-1,) , scope = 0)
-
-    if theta_values is None:
-        aleatory = True
-    else:
-        aleatory = False
-
-    rng = np.random.default_rng()
-
-    glob_history = []
-
-    cycle = 0
-
-    for _ in range(num_iterations):
+            glob_history.append((result, final_circuit, history, cycle, magnet_avg))
+            glob_history.sort(key=lambda x: x[2]['cost'][-1])
+            # for histories in glob_history:
         
-        if aleatory and ansatz_name == 'ansatz_simple_rotation':
-            theta_values = rng.random(n_qubits) * 4 * np.pi
-        elif aleatory and ansatz_name == 'ansatz_Efficient_SU2':
-            theta_values = rng.random(4 * n_qubits) * 4 * np.pi
-        elif aleatory and ansatz_name == 'ansatz_two_local':
-            rep = ansatz_kwargs.get('repetitions', 1)
-            entanglement = ansatz_kwargs.get('entanglement', 'linear')
-            entanglement_gate = ansatz_kwargs.get('entanglement_gate', 'cx')
-            if entanglement_gate in ('crx', 'cry', 'crz'):
-                if entanglement in ('linear', 'reverse_linear'):
-                    theta_values = rng.random(n_qubits * (2 * rep + 1) - rep) * 4 * np.pi
-                elif entanglement == 'full':
-                    theta_values = rng.random(n_qubits * ( (n_qubits-1)*rep/2 + rep+1 )) * 4 * np.pi
-                elif entanglement == 'circular':
-                    theta_values = rng.random(n_qubits * ( 2*rep + 1)) * 4 * np.pi
-            elif entanglement_gate in ('cx',):
-                theta_values = rng.random(n_qubits*(rep+1)) * 4 * np.pi
-        elif aleatory and ansatz_name == 'ansatz_transerse_ising':
-            param_set = ansatz_kwargs.get('param_set', 'unique')
-            if param_set == 'unique':
-                theta_values = rng.random(3) * 4 * np.pi
-            elif param_set == 'complete':
-                theta_values = rng.random(n_qubits+2) * 4 * np.pi
-
-        history = {
-            'cost': [],
-            'params': [],
-            'state': []
-        }
-        def callback(p):
-            history["cost"].append(expected_value_H_ising_1D.value)
-            history["params"].append(p)
-            history["state"].append(expected_value_H_ising_1D.state)
-
-        result_scipy = minimize(fun = cost_function, x0 = theta_values, method = 'COBYLA', callback = callback)
-        cycle +=1
-        print('\n----------------------------------------------------------------------------------------------------------------------\n')
-        print("Cycle:", cycle)
-        print("Success:", result_scipy.success)
-        print("Status:", result_scipy.status)
-        print("Message:", result_scipy.message)
-        print("Function value at minimum:", result_scipy.fun)
-        print("Optimal parameters:", result_scipy.x)
-        print("Number of iterations performed:", result_scipy.get('nit', 'Not available'))
-        print("Number of function evaluations:", result_scipy.get('nfev', 'Not available'))
-        
-        history['number_evaluations'] = result_scipy.get('nfev', 'Not available')
-        history['optimal parameters'] = result_scipy.x
-        history['iterations'] = result_scipy.get('nit', 'Not available')
+        end = time.perf_counter()
+        glob_runtime = end - start
 
 
-        final_circuit = ansatz.assign_parameters(result_scipy.x, inplace = False)
-        final_circuit.measure(range(n_qubits), range(n_qubits))
-        result, probs = computar_circuito(circuit=final_circuit)
-        state = result.get_statevector()
-        print(f'La función de onda final tras la optimización es: {state.data}')
-        print(f'El resultado de computar el circuito optimizado es (tras normalizarlo): {probs}')
-        print(f'El Hamiltoniano analizado es: {hamiltoniano}, con un valor esperado de {result_scipy.fun}')
-
-        ############# MAGNETIZACION ##############
-
-        magnet_avg = expected_value_H_ising_1D(theta_values = history['optimal parameters'], h_terms = magnetizacion, ansatz = ansatz, magn = True)/n_qubits
-        print(f'La magnetización es de: {magnet_avg}')
-        
-        glob_history.append((result, final_circuit, history, cycle, magnet_avg))
-        glob_history.sort(key=lambda x: x[2]['cost'][-1])
-        # for histories in glob_history:
-    
-    end = time.perf_counter()
-    glob_runtime = end - start
-
-
-    return glob_history, glob_runtime
+        return glob_history, glob_runtime
 
 
 def analizar_vqe(job: tuple, hamiltoniano_matriz, ansatz: str, optimizer: str = 'COBYLA', title: str = 'Ising Hamiltonian'):
