@@ -352,22 +352,25 @@ def analizar_vqe(job: tuple, hamiltoniano_matriz, ansatz: str, optimizer: str = 
         print(f'Total overlap: {total_overlap}')
         # Pintar la primera curva en el primer subplot
         ax[0].plot(history['cost'], label=f'(cycle: {cycle}): {history["cost"][-1]:.4f}\n'
-                   f'm_z: {magnet_avg:.2f}', linestyle='-')
+                   f'm_z: {magnet_avg:.2f}', linestyle='-', linewidth=1)
 
         # Pintar la segunda curva en el segundo subplot
         # for i in overlap:
         
-        ax[1].plot(total_overlap, label=f'((cycle: {cycle}): {total_overlap[-1]:.4f}', linestyle='-')
+        ax[1].plot(total_overlap, label=f'((cycle: {cycle}): {total_overlap[-1]:.4f}', linestyle='-', linewidth=1)
 
         if num == 4:
              break
 
+    for energy in np.unique(w):
+        if energy != e_ground:
+            ax[0].axhline(y = energy, color='k', linestyle='--', linewidth=1.5)
 
-    ax[0].axhline(y=e_ground, label=f'Exact E_g: {e_ground:.4f}', color='k', linestyle='--')
+    ax[0].axhline(y=e_ground, label=f'Exact E_g: {e_ground:.4f}', color='k', linestyle='--', linewidth=2)
     ax[0].set_xlabel('Iteration')
     ax[0].set_title('Cost')
     ax[0].legend()
-    ax[1].axhline(y=1, label='Maximum overlap', color='k', linestyle='--')
+    ax[1].axhline(y=1, label='Maximum overlap', color='k', linestyle='--', linewidth=2)
     ax[1].set_xlabel('Iteration')
     ax[1].set_title(f'Overlap (deg: {degeneration})')
     ax[1].legend()
