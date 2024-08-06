@@ -121,6 +121,7 @@ def prepare_to_measure(qc: QuantumCircuit, basis_term = None):
 def computar_circuito(circuit, num_shots = 1024):
     
     sim = qiskit_aer.AerSimulator()
+    circuit_transpiled = qiskit.transpile(circuit, sim)
     job = sim.run(circuit, shots = num_shots, memory = True)
     result = job.result()
     counts_MSBF = result.get_counts()
