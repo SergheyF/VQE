@@ -22,23 +22,31 @@ ErrorNames = Literal['bit-flip']
 class Vqe:
     
     def __init__(self,n_qubits: int, error_type: ErrorNames = None, **kwargs) -> None:
-        # El error se debe especificar como una tupla o lista [RESET, MEAS, 1GATE]
+        # El error se debe especificar como una tupla o lista [RESET, MEAS, 1GATE, 2GATE]
         self.n_qubits = n_qubits
         self.noise_model = None
 
         if error_type:
             self.noise_model = NoiseModel()
-            if error_type == 'bit-flip':
-                probs = kwargs.get('probs', [0.05, 0.05, 0.05])
-                error_reset = pauli_error([('X', probs[0]), ('I', 1 - probs[0])])
-                error_meas = pauli_error([('X', probs[1]), ('I', 1 - probs[1])])
-                error_gate1 = pauli_error([('X', probs[2]), ('I', 1 - probs[2])])
-                error_gate2 = error_gate1.tensor(error_gate1)
 
-                self.noise_model.add_all_qubit_quantum_error(error = error_reset, instructions = 'reset')
-                self.noise_model.add_all_qubit_quantum_error(error_meas, "measure")
-                self.noise_model.add_all_qubit_quantum_error(error_gate1, ["u1", "u2", "u3"])
-                self.noise_model.add_all_qubit_quantum_error(error_gate2, ["cx"])
+            if error_type == 'bit-flip':
+                probs = kwargs.get('probs', [0.05, 0.05, 0.05, 0.05])
+                if probs[0] != 0:
+                    error_reset = pauli_error([('X', probs[0]), ('I', 1 - probs[0])])
+                    self.noise_model.add_all_qubit_quantum_error(error = error_reset, instructions = 'reset')
+
+                if probs[1] != 0:
+                    error_meas = pauli_error([('X', probs[1]), ('I', 1 - probs[1])])
+                    self.noise_model.add_all_qubit_quantum_error(error_meas, "measure")
+
+                if probs[2] != 0:
+                    error_gate1 = pauli_error([('X', probs[2]), ('I', 1 - probs[2])])
+                    self.noise_model.add_all_qubit_quantum_error(error_gate1, ["u1", "u2", "u3"])
+
+                if probs[3] != 0:
+                    error_gate2 = pauli_error([('X', probs[3]), ('I', 1 - probs[3])])
+                    error_gate2 = error_gate2.tensor(error_gate2)
+                    self.noise_model.add_all_qubit_quantum_error(error_gate2, ["cx"])
 
     def __call__(self, hamiltoniano: dict, num_iterations: int = 1, ansatz_name: ansätze.AnsatzName = None, theta_values: Iterable = None, **ansatz_kwargs: Any) -> Tuple[Dict, float]:
 
@@ -213,7 +221,7 @@ def analizar_vqe(job: tuple, hamiltoniano_matriz, ansatz: str, optimizer: str = 
     ax[1].legend()
 
     fig.suptitle(f'{title}', fontsize=16, fontweight = 'bold')
-    fig.text(0.85, 0.98, f'qubits: {n_qubits}', ha='right', fontsize=12, fontstyle='italic');
+    fig.text(0.85, 0.98, f'qubits: {n_qubits}, # iter: {len(glob_history)}', ha='right', fontsize=12, fontstyle='italic');
     fig.text(0.1, 0.98, f'ansatz: {ansatz}', ha='left', fontsize=12, fontstyle='italic');
     fig.text(0.1, 0.93, f'runtime: {horas:.0f}:{minutos:.0f}:{segundos:.1f}', ha='left', fontsize=12, fontstyle='italic');
     fig.text(0.5, 0.9, f'optimizer: {optimizer}', ha='center', fontsize=12, fontstyle='italic');
