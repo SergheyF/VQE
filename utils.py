@@ -115,12 +115,12 @@ def computar_circuito(circuit, num_shots = 1024, noise_model = None):
     circuit_transpiled = qiskit.transpile(circuit, sim)
     job = sim.run(circuit_transpiled, shots = num_shots, memory = True)
     result = job.result()
-    counts_MSBF = result.get_counts()
+    counts_LSBF = result.get_counts() 
     probs = {}
     
-    for key in counts_MSBF:
+    for key in counts_LSBF:
         nueva_key = key[::-1]
-        probs[nueva_key] = counts_MSBF[key]/num_shots
+        probs[nueva_key] = counts_LSBF[key]/num_shots
     
     return result, probs
 
@@ -138,57 +138,87 @@ def valor_esperado_Pauli_string(estado, pauli_string):
 
     return e
 
+def separate_terms(hamiltonian: dict):
+    same_compute: dict = {}
+    different_comput: dict = {}
+    for key, value in hamiltonian.items():
+
+        all_z_or_i = True
+
+        for _, gate in key:
+            if gate not in ('Z', 'I'):
+                all_z_or_i = False
+        
+        if all_z_or_i:
+            same_compute[key] = value
+        else:
+            different_comput[key] = value
+    return same_compute, different_comput
+
 # Los parámetros a optimizar deben ser el primer argumento
 class ExpectedValueHIsing1DWrapper:
 
-    def __init__(self, vqe_instance) -> None:
+    def __init__(self, noise_model) -> None:
         self.value = None
         self.state = None
-        self.vqe_instance = vqe_instance
+        self.noise_model = noise_model
     
     def __call__(self, theta_values: Iterable, h_terms: dict, ansatz: QuantumCircuit, magn: bool = False) -> float:
         # Ahora h_terms va a ser en minúscula y va a ser un diccionario:  {((qubit, 'operador'), (qubit, 'operador')): coef}
         self.value = 0
         # print(f'\nVeamos el valor esperado del Hamiltoniano: {h_terms}')
 
-        mag_per_state: dict = {}
+        same_compute_terms, different_compute_terms = separate_terms(hamiltonian = h_terms)
         
-        for term_tuples, coef in h_terms.items():
-            
+
+        qc_same_compute = ansatz.assign_parameters(theta_values, inplace = False)
+        qc_same_compute.measure(range(qc_same_compute.num_qubits), range(qc_same_compute.num_qubits))
+        result, probs = computar_circuito(circuit = qc_same_compute, noise_model = self.noise_model)
+        self.state = result.get_statevector()
+        for state in probs:
+            e = 0
+            for term_tuples, coef in same_compute_terms.items():
+                valor = valor_esperado_Pauli_string(estado = state, pauli_string = term_tuples)
+                e += valor * probs[state] * coef
+            if magn:
+                self.value += np.abs(e)
+            else:
+                self.value += e
+
+
+        for term_tuples, coef in different_compute_terms.items():
             basis_term = change_basis(h_term = term_tuples)
             
             qc = ansatz.assign_parameters(theta_values, inplace = False)
 
             qc_measure = prepare_to_measure(qc = qc, basis_term = basis_term)
 
-            result, probs = computar_circuito(circuit = qc_measure, noise_model = self.vqe_instance.noise_model)
+            result, probs = computar_circuito(circuit = qc_measure, noise_model = self.noise_model)
 
             self.state = result.get_statevector()
 
             e = 0
 
-            if not magn:
+            for state in probs:
 
-                for state in probs:
+                valor = valor_esperado_Pauli_string(estado = state, pauli_string = term_tuples)
+                e += valor * probs[state] * coef
 
-                    valor = valor_esperado_Pauli_string(estado = state, pauli_string = term_tuples)
-                    e += valor * probs[state] * coef
-
-                self.value += e
+            self.value += e
             
-            else:
+            # else:
                 
-                for state in probs:
-                    if state not in mag_per_state:
-                        mag_per_state[state] = 0
-                    valor = valor_esperado_Pauli_string(estado = state, pauli_string = term_tuples)
-                    mag_per_state[state] += valor * probs[state] * coef
+            #     for state in probs:
+            #         if state not in mag_per_state:
+            #             mag_per_state[state] = 0
+            #         valor = valor_esperado_Pauli_string(estado = state, pauli_string = term_tuples)
+            #         mag_per_state[state] += valor * probs[state] * coef
             
-        if magn:
+        # if magn:
 
-            for state in mag_per_state:
+        #     for state in mag_per_state:
 
-                self.value += np.abs(mag_per_state[state])
+        #         self.value += np.abs(mag_per_state[state])
 
 
     

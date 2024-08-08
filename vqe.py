@@ -61,7 +61,7 @@ class Vqe:
             print("Es necesario expecificar un tipo de ansatz")
             sys.exit(1)
         
-        expected_value_H_ising_1D = utils.ExpectedValueHIsing1DWrapper(vqe_instance = self)
+        expected_value_H_ising_1D = utils.ExpectedValueHIsing1DWrapper(noise_model = self.noise_model)
         cost_function = lambda p: expected_value_H_ising_1D(p, h_terms = hamiltoniano, ansatz = ansatz)
         magnetizacion = hamiltonians.ising_Hamiltonian_1D(n_qubits = n_qubits,J1 = (-1,) , scope = 0)
 
@@ -101,7 +101,7 @@ class Vqe:
                     theta_values = rng.random(3) * 4 * np.pi
                 elif param_set == 'complete':
                     theta_values = rng.random(n_qubits+2) * 4 * np.pi
-
+                    
             history = {
                 'cost': [],
                 'params': [],
