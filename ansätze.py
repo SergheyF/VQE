@@ -14,7 +14,7 @@ import time
 from qiskit.visualization import plot_state_hinton
 
 
-def ansatz_simple_rotation(n_qubits: int, axis: str = 'x'):
+def ansatz_simple_rotation(n_qubits: int, axis: str = 'x', save_state = True):
     
     if axis not in ('x', 'y', 'z'):
         raise ValueError("El argumento 'axis' debe ser un string válido")
@@ -36,12 +36,13 @@ def ansatz_simple_rotation(n_qubits: int, axis: str = 'x'):
         print("Axis must be x/y/z or X/Y/Z")
         sys.exit(1)
 
-    qc.save_statevector()
+    if save_state:
+        qc.save_statevector()
 
     return qc
 
 
-def ansatz_Efficient_SU2(n_qubits: int):
+def ansatz_Efficient_SU2(n_qubits: int, save_state = True):
 
     theta = ParameterVector("theta", 4 * n_qubits)
     
@@ -58,7 +59,8 @@ def ansatz_Efficient_SU2(n_qubits: int):
         qc.ry(theta[2*n_qubits + i], i)
         qc.rz(theta[3*n_qubits + i],i)
 
-    qc.save_statevector()
+    if save_state:
+        qc.save_statevector()
 
     return qc
 
@@ -76,7 +78,8 @@ entanglement_gate_dict: Dict[str, Any] = {
     'crz': QuantumCircuit.crz
 }
 
-def ansatz_two_local(n_qubits: int, repetitions: int = 1, rotation_gate: RotationGates = 'ry', entanglement: EntanglementNames = 'linear', entanglement_gate: EntanglementGateNames = 'cx'):
+def ansatz_two_local(n_qubits: int, repetitions: int = 1, rotation_gate: RotationGates = 'ry',
+                      entanglement: EntanglementNames = 'linear', entanglement_gate: EntanglementGateNames = 'cx', save_state = True):
     
     if entanglement_gate in ('crx', 'cry', 'crz'):
         if entanglement in ('linear', 'reverse_linear'):
@@ -150,13 +153,14 @@ def ansatz_two_local(n_qubits: int, repetitions: int = 1, rotation_gate: Rotatio
         rotation_gate_dict[rotation_gate](qc, theta[theta_index], i)
         theta_index += 1
 
-    qc.save_statevector()
+    if save_state:
+        qc.save_statevector()
 
     return qc
 
 ParamSetType = Literal['unique', 'complete']
 
-def ansatz_transerse_ising(n_qubits: int, rotation_gate: RotationGates = 'ry', param_set: ParamSetType = 'unique'):
+def ansatz_transerse_ising(n_qubits: int, rotation_gate: RotationGates = 'ry', param_set: ParamSetType = 'unique', save_state = True):
     
     qc = QuantumCircuit(n_qubits, n_qubits)
 
@@ -183,7 +187,8 @@ def ansatz_transerse_ising(n_qubits: int, rotation_gate: RotationGates = 'ry', p
         elif param_set == 'complete':
             rotation_gate_dict[rotation_gate](qc, theta[i+2], i)
 
-    qc.save_statevector()
+    if save_state:
+        qc.save_statevector()
 
     return qc
 

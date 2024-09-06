@@ -17,12 +17,16 @@ import time
 from qiskit.visualization import plot_state_hinton 
 from modules_v1 import ansätze, hamiltonians, utils
 
-ErrorNames = Literal['bit-flip']
+ErrorNames = Literal['bit-flip', 'thermal']
 
 class Vqe:
     
     def __init__(self,n_qubits: int, error_type: ErrorNames = None, **kwargs) -> None:
-        # El error se debe especificar como una tupla o lista [RESET, MEAS, 1GATE, 2GATE]
+        # El error de 'bit-flip' se debe especificar como una tupla o lista prob = [RESET, MEAS, 1GATE, 2GATE]
+        # El error de termalización se debe especificar como una tupla 't1' = (T1, a) con T1 en nanosegundos y T2 = a*T1 con a <=2
+        # Para el error de termalización además de t1 se especificará 'qerr' como lista o tupla = [RESET, MEAS, 1GATE] siendo True o False 
+        # dependiendo de el QuantumError que se quiera implementar. No vamos a trabajar con errores de 2 puertas porque el ansatz es de
+        # rotación simple, por ese motivo no se implementa.
         self.n_qubits = n_qubits
         self.noise_model = None
 
@@ -47,6 +51,44 @@ class Vqe:
                     error_gate2 = pauli_error([('X', probs[3]), ('I', 1 - probs[3])])
                     error_gate2 = error_gate2.tensor(error_gate2)
                     self.noise_model.add_all_qubit_quantum_error(error_gate2, ["cx"])
+
+                print(f'VQE job created with {error_type} noise model\nProbs: [RESET: {probs[0]}, MEAS: {probs[1]}, 1GATE: {probs[2]}, 2GATE: {probs[3]}] ')
+            
+            elif error_type == 'thermal':
+                t1, a = kwargs.get('t1', (100, 2)) # Si no se especifica se asume que es 100 nanosegundos
+                t2 = a*t1
+                if a > 2:
+                    raise ValueError('El valor de a no es físicamente válido.')
+                qerr = kwargs.get('qerr', [True, True, True]) # Para saber qué errores se han de implementar, por defecto se implementan todos
+                time_u1 = 0   # virtual gate
+                time_u2 = 50  # (single X90 pulse)
+                time_u3 = 100 # (two X90 pulses)
+                time_reset = 1000   # 1 microsecond
+                time_measure = 1000 # 1 microsecond
+
+                # QuantumErrors
+                if qerr[0]:
+                    error_reset = thermal_relaxation_error(t1, t2, time_reset)
+                    self.noise_model.add_all_qubit_quantum_error(error = error_reset, instructions = 'reset')
+                if qerr[1]:
+                    error_measure = thermal_relaxation_error(t1, t2, time_measure)
+                    self.noise_model.add_all_qubit_quantum_error(error = error_measure, instructions = 'measure')
+                if qerr[2]:
+                    error_u1 = thermal_relaxation_error(t1, t2, time_u1)
+                    self.noise_model.add_all_qubit_quantum_error(error = error_u1, instructions = 'u1')
+                    error_u2 = thermal_relaxation_error(t1, t2, time_u2)
+                    self.noise_model.add_all_qubit_quantum_error(error = error_u2, instructions = 'u2')
+                    error_u3 = thermal_relaxation_error(t1, t2, time_u3)
+                    self.noise_model.add_all_qubit_quantum_error(error = error_u3, instructions = 'u3')
+
+                print(f'VQE job created with {error_type} noise model\n'
+                      f'T1 = {t1}; T2 = {t2}'
+                      f'Types: [RESET: {qerr[0]}, MEAS: {qerr[1]}, 1GATE: {qerr[2]}]')        
+        elif error_type is None:
+            print('VQE job created without noise model')
+                
+
+            
 
     def __call__(self, hamiltoniano: dict, num_iterations: int = 1, ansatz_name: ansätze.AnsatzName = None, theta_values: Iterable = None, **ansatz_kwargs: Any) -> Tuple[Dict, float]:
 
@@ -144,7 +186,6 @@ class Vqe:
             
             glob_history.append((result, final_circuit, history, cycle, magnet_avg))
             glob_history.sort(key=lambda x: x[2]['cost'][-1])
-            # for histories in glob_history:
         
         end = time.perf_counter()
         glob_runtime = end - start
@@ -153,7 +194,7 @@ class Vqe:
         return glob_history, glob_runtime
 
 
-def analizar_vqe(job: tuple, hamiltoniano_matriz, ansatz: str, optimizer: str = 'COBYLA', title: str = 'Ising Hamiltonian'):
+def analizar_vqe(job: tuple, hamiltoniano_matriz, ansatz: str, optimizer: str = 'COBYLA', title: str = 'Ising Hamiltonian', n_cycles = 5):
     glob_history = job[0]
     glob_runtime = job[1]
     horas = glob_runtime // 3600
@@ -162,7 +203,7 @@ def analizar_vqe(job: tuple, hamiltoniano_matriz, ansatz: str, optimizer: str = 
     n_qubits = int(np.log2(hamiltoniano_matriz.shape[0]))
 
     # Bloque de diagonalización
-    e_ground, (w,v), degeneration = diagonalizar(hamiltoniano_matriz)
+    e_ground, (w,v), degeneration, _ = diagonalizar(hamiltoniano_matriz)
     ground_states = v[:, np.where(w == np.min(w))]
 
     print(f'La matriz del Hamiltoniano es:\n {hamiltoniano_matriz}\n\n'
@@ -180,13 +221,14 @@ def analizar_vqe(job: tuple, hamiltoniano_matriz, ansatz: str, optimizer: str = 
     # Estructura glob_history: List[Tuple[Any, Any, Dict]] = [] 
     # glob_history: List[Tuple[result, final_circuit, history]] = [] 
 
+    last_overlaps = []
     for num, iteration in enumerate(glob_history):
 
         history = iteration[2]
         cycle = iteration[3]
         magnet_avg = iteration[4]
         overlap = []
-
+        
         for ground_state in ground_states.T:
             overlap_row = []
             for state_vqe in history['state']:
@@ -194,22 +236,22 @@ def analizar_vqe(job: tuple, hamiltoniano_matriz, ansatz: str, optimizer: str = 
             overlap.append(overlap_row)
         total_overlap = [sum(overlaps) for overlaps in zip(*overlap)]
         
-        print(f'Total overlap: {total_overlap}')
-        # Pintar la primera curva en el primer subplot
-        ax[0].plot(history['cost'], label=f'(cycle: {cycle}): {history["cost"][-1]:.4f}\n'
-                   f'm_z: {magnet_avg:.2f}', linestyle='-', linewidth=1)
+        # print(f'Total overlap: {total_overlap}')
+        if num < n_cycles:
+            # Pintar la primera curva en el primer subplot
+            ax[0].plot(history['cost'], label=f'(cycle: {cycle}): {history["cost"][-1]:.4f}\n'
+                    f'm_z: {magnet_avg:.2f}', linestyle='-', linewidth=1)
 
-        # Pintar la segunda curva en el segundo subplot
-        # for i in overlap:
-        
-        ax[1].plot(total_overlap, label=f'((cycle: {cycle}): {total_overlap[-1]:.4f}', linestyle='-', linewidth=1)
+            # Pintar la segunda curva en el segundo subplot
+            # for i in overlap:
+            
+            ax[1].plot(total_overlap, label=f'((cycle: {cycle}): {total_overlap[-1]:.4f}', linestyle='-', linewidth=1)
+        last_overlaps.append(total_overlap[-1])
 
-        if num == 4:
-             break
-
-    for energy in np.unique(w):
+    for i, energy in enumerate(np.unique(w)):
         if energy != e_ground:
-            ax[0].axhline(y = energy, color='k', linestyle='--', linewidth=1.5)
+            if i <4:
+                ax[0].axhline(y = energy, color='k', linestyle='--', linewidth=1.5)
 
     ax[0].axhline(y=e_ground, label=f'Exact E_g: {e_ground:.4f}', color='k', linestyle='--', linewidth=2)
     ax[0].set_xlabel('Iteration')
@@ -226,10 +268,11 @@ def analizar_vqe(job: tuple, hamiltoniano_matriz, ansatz: str, optimizer: str = 
     fig.text(0.1, 0.93, f'runtime: {horas:.0f}:{minutos:.0f}:{segundos:.1f}', ha='left', fontsize=12, fontstyle='italic');
     fig.text(0.5, 0.9, f'optimizer: {optimizer}', ha='center', fontsize=12, fontstyle='italic');
     
-    return fig, ax
+    return fig, ax, last_overlaps
 
-def diagonalizar(matrix, printing: bool = False):
 
+def diagonalizar(matrix, printing: bool = False, magnetizacion_matrix = None):
+    n_qubits = int(np.log2(matrix.shape[0]))
     w, v = np.linalg.eig(matrix)
 
     e_ground = np.min(w)
@@ -237,8 +280,19 @@ def diagonalizar(matrix, printing: bool = False):
     # ground_states = v[:, np.where(w == np.min(w))[0]]
 
     ground_states = v[:, np.where(np.isclose(w, e_ground))[0]]
-    degeneration = np.sum(np.isclose(w, e_ground))
+    degeneration = ground_states.shape[1]
 
+
+    if magnetizacion_matrix is not None:
+        magn = 0
+        for i in range(ground_states.shape[1]):
+            psi = ground_states[:, i]
+            print(f'ground state: {psi}')
+
+            valor_esperado = np.conjugate(psi).T @ magnetizacion_matrix @ psi
+            magn += np.abs(valor_esperado)/n_qubits
+        magn /= degeneration
+        print(f'La magnetizacion es: {magn}')
     if printing:
         print(f'La matriz del Hamiltoniano es:\n {matrix}\n\n'
             'Este hamiltoniano tiene los siguientes estados propios con sus correspondientes energías (calculadas de manera exacta):\n')
@@ -250,4 +304,7 @@ def diagonalizar(matrix, printing: bool = False):
         print(f'El ground state (exacto) asociado al Hamiltoniano del problema es: \n {ground_states} \n'
             f'con una energía de: {e_ground} y degeneración: {degeneration}')
     
-    return e_ground, (w,v), degeneration
+    if magnetizacion_matrix is not None:
+        return e_ground, (w,v), degeneration, magn
+    else:
+        return e_ground, (w,v), degeneration, None

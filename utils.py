@@ -4,6 +4,7 @@ from typing import Iterable
 import qiskit
 from qiskit import QuantumCircuit
 import qiskit_aer
+from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
 
 
 
@@ -109,11 +110,15 @@ def prepare_to_measure(qc: QuantumCircuit, basis_term = None):
     return qc
 
 
-def computar_circuito(circuit, num_shots = 1024, noise_model = None):
+def computar_circuito(circuit, num_shots = 4000, noise_model = None):
     
     sim = qiskit_aer.AerSimulator(noise_model = noise_model)
-    circuit_transpiled = qiskit.transpile(circuit, sim)
+    circuit_transpiled = qiskit.transpile(circuit, sim, optimization_level = 3)
     job = sim.run(circuit_transpiled, shots = num_shots, memory = True)
+    # passmanager = generate_preset_pass_manager(optimization_level = 3, backend = sim)
+    # circuit_transpiled = passmanager.run(circuit)
+    # job = sim.run(circuit_transpiled, shots = num_shots, memory = True)
+
     result = job.result()
     counts_LSBF = result.get_counts() 
     probs = {}
@@ -169,7 +174,8 @@ class ExpectedValueHIsing1DWrapper:
         # print(f'\nVeamos el valor esperado del Hamiltoniano: {h_terms}')
 
         same_compute_terms, different_compute_terms = separate_terms(hamiltonian = h_terms)
-        
+        if magn:
+            print(same_compute_terms)
 
         qc_same_compute = ansatz.assign_parameters(theta_values, inplace = False)
         qc_same_compute.measure(range(qc_same_compute.num_qubits), range(qc_same_compute.num_qubits))
@@ -205,22 +211,6 @@ class ExpectedValueHIsing1DWrapper:
                 e += valor * probs[state] * coef
 
             self.value += e
-            
-            # else:
-                
-            #     for state in probs:
-            #         if state not in mag_per_state:
-            #             mag_per_state[state] = 0
-            #         valor = valor_esperado_Pauli_string(estado = state, pauli_string = term_tuples)
-            #         mag_per_state[state] += valor * probs[state] * coef
-            
-        # if magn:
-
-        #     for state in mag_per_state:
-
-        #         self.value += np.abs(mag_per_state[state])
-
-
     
         # print(f'En esta iteración el Hamiltoniano tiene un valor esperado de: {self.value}, probs: {probs}\n')
 
